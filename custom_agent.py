@@ -38,6 +38,8 @@ if __name__ == '__main__':
         if not api_key.startswith('sk-'):
             st.warning('Please enter your OpenAI API key!', icon='⚠')
 
+    
+    # The following code is heavily inspired by samwit/llm_tutorial
     # Define which tools the agent can use to answer user queries
     search = DuckDuckGoSearchRun()
 
