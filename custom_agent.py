@@ -16,12 +16,12 @@ from langchain_google_genai import GoogleGenerativeAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.memory import ConversationBufferWindowMemory
 
-# Rate limiting variables (Gemini-1.5-pro: 2 requests per minute, placeholder for token limits)
+# --- Updated rate limiting variables for Gemini 2.0 Flash ---
 RATE_LIMIT_SECONDS = 60  # 1 minute window
-MAX_REQUESTS_PER_MINUTE = 2
-MAX_TOKENS_PER_MINUTE = 32000  # Placeholder; token usage not actively tracked here.
-request_times = []
-token_count = 0  # For demonstration purposes
+MAX_TOKENS_PER_MINUTE = 10_000_000  # 10 million tokens per minute (EU region)
+
+# Store (timestamp, tokens_used) tuples for sliding window token count
+request_tokens = []
 
 def clear_history():
     if 'history' in st.session_state:
@@ -73,7 +73,6 @@ tools = [
         description="useful for when you need to answer medical and pharmacological questions"
     )
 ]
-
 
 # Initialize session state variables if not already set
 if "history" not in st.session_state:
@@ -169,13 +168,11 @@ prompt_with_history = CustomPromptTemplate(
 
 class CustomOutputParser(AgentOutputParser):
     def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
-        # Check if Final Answer is present; if so, use it.
         if "Final Answer:" in llm_output:
             return AgentFinish(
                 return_values={"output": llm_output.split("Final Answer:")[-1].strip()},
                 log=llm_output,
             )
-        # Improved regex to capture action and optional action input.
         regex = r"Action\s*\d*\s*:\s*(.*?)\n(?:Action\s*\d*\s*Input\s*\d*\s*:\s*(.*))?"
         match = re.search(regex, llm_output, re.DOTALL)
         if match:
@@ -183,34 +180,37 @@ class CustomOutputParser(AgentOutputParser):
             action_input = match.group(2).strip() if match.group(2) else ""
             if action:
                 return AgentAction(tool=action, tool_input=action_input, log=llm_output)
-        # Fallback: return the raw output.
         return AgentFinish(return_values={"output": llm_output.strip()}, log=llm_output)
 
 output_parser = CustomOutputParser()
 
-def is_rate_limited():
-    global request_times
+# --- Updated token-based rate limit check ---
+def is_rate_limited(tokens_this_request: int) -> bool:
+    global request_tokens
     now = time.time()
-    # Remove timestamps older than RATE_LIMIT_SECONDS
-    request_times = [t for t in request_times if now - t < RATE_LIMIT_SECONDS]
-    return len(request_times) >= MAX_REQUESTS_PER_MINUTE
+    request_tokens = [(t, tok) for (t, tok) in request_tokens if now - t < RATE_LIMIT_SECONDS]
+    tokens_used = sum(tok for _, tok in request_tokens)
+    if tokens_used + tokens_this_request > MAX_TOKENS_PER_MINUTE:
+        return True
+    request_tokens.append((now, tokens_this_request))
+    return False
 
 def get_last_condition(history):
     matches = re.findall(r"Q:\s*(.*?)\n", history)
-    return matches[-1] if matches else None  # Get the most recent question
+    return matches[-1] if matches else None
 
 def generate_response(input_query, k_value=3):
-    global request_times
-
-    if is_rate_limited():
+    tokens_this_request = max(len(input_query) // 4, 1)
+    if is_rate_limited(tokens_this_request):
         st.warning(f"Rate limit exceeded. Please wait {RATE_LIMIT_SECONDS} seconds.")
         return "The system is currently overloaded. Please try again later."
 
     try:
-        llm = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro-latest", temperature=0.0)
+        # Updated Gemini model
+        llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0)
         llm_chain = LLMChain(llm=llm, prompt=prompt_with_history)
         tool_names = [tool.name for tool in tools]
-        memory = st.session_state.memory  # Use stored memory
+        memory = st.session_state.memory
 
         agent = LLMSingleActionAgent(
             llm_chain=llm_chain,
@@ -231,7 +231,6 @@ def generate_response(input_query, k_value=3):
             if last_condition:
                 input_query = f"{input_query} (Referring to: {last_condition})"
 
-        request_times.append(time.time())
         response = agent_executor.run(input_query)
         return response
 
@@ -244,7 +243,6 @@ with st.form(key="my_query", clear_on_submit=True):
     submit_button = st.form_submit_button("Submit")
 
 if submit_button:
-    # Display processing GIF
     gif_runner = st.image("doc.gif", caption="Processing your request", output_format="auto")
     answer = generate_response(q, k_value)
     time.sleep(0.5)
@@ -252,3 +250,4 @@ if submit_button:
     st.text_area('**Suggestion**', value=answer, height=200)
     st.session_state.history = f'Q: {q} \nA: {answer} \n{"-" * 130} \n{st.session_state.history}'
     st.text_area(label='Chat history', key='history', height=400)
+
