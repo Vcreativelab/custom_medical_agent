@@ -180,13 +180,15 @@ def format_sources(src_dict):
 # --- define branches ---
 search_branch = (
     RunnableLambda(lambda x: medical_search(x["input"]))
-    | RunnableLambda(lambda res, x=None: {
+    | RunnableLambda(lambda res, x: {
         "sources": format_sources(res),
-        "question": x["input"] if x and "input" in x else "",
+        "question": x["input"],
+        "history": x.get("history", [])
     })
     | summarise_chain
-    | RunnableLambda(lambda summary, x=None: {
-        "input": f"{x['input']}\n\nContext from verified sources:\n{summary}" if x else summary
+    | RunnableLambda(lambda summary, x: {
+        "input": f"{x['input']}\n\nContext from verified sources:\n{summary}",
+        "history": x.get("history", [])
     })
     | medical_prompt
     | llm
@@ -226,7 +228,9 @@ if submit:
     time.sleep(0.6)
     gif_runner.empty()
 
-    st.text_area("💬 Suggestion", value=answer, height=220)
+    st.markdown("### 💬 Suggestion")
+    st.markdown(answer, unsafe_allow_html=True)
+
     st.session_state.memory.chat_memory.add_message(HumanMessage(content=user_query))
     st.session_state.memory.chat_memory.add_message(AIMessage(content=answer))
 
