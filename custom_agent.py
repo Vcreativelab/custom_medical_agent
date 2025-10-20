@@ -22,7 +22,7 @@ import google.generativeai as genai
 # Streamlit page setup
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="What's up Doc? 🤖🩺")
-st.title("What's up Doc? 🤖🩺")
+st.title("What's up Doc? 🩺⚕️")
 
 # ---------------------------------------------------------------------
 # Rate limiting setup
@@ -196,8 +196,9 @@ search_branch = (
 no_search_branch = medical_prompt | llm | StrOutputParser()
 
 router_chain = RunnableBranch(
-    branches=[(lambda x: route(x["input"]) == "search", search_branch)],
-    default=no_search_branch,
+    condition=lambda x: route(x["input"]) == "search",
+    true=search_branch,
+    false=no_search_branch
 )
 
 # ---------------------------------------------------------------------
