@@ -191,7 +191,7 @@ def format_sources(src_dict):
     return formatted
 
 
-# --- define branches ---
+# --- define search branch safely ---
 search_branch = (
     # Step 1: Perform cached medical search
     RunnableLambda(lambda x: {
@@ -199,30 +199,30 @@ search_branch = (
         "question": x["input"],
         "history": x.get("history", [])
     })
-    
+
     # Step 2: Format results for summarisation
     | RunnableLambda(lambda x: {
         "sources": format_sources(x["results"]),
         "question": x["question"],
         "history": x["history"]
     })
-    
-    # Step 3: Summarise sources
+
+    # Step 3: Summarise sources with safe fallback
     | RunnableLambda(lambda x: {
         "summary": summarise_chain.invoke({
             "sources": x["sources"],
             "question": x["question"]
-        }),
+        }) if x["sources"].strip() else "No verified sources found for this query.",
         "question": x["question"],
         "history": x["history"]
     })
-    
+
     # Step 4: Prepare input for final LLM
     | RunnableLambda(lambda x: {
         "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{x['summary']}",
         "history": x["history"]
     })
-    
+
     # Step 5: Generate user-facing answer
     | medical_prompt
     | llm
