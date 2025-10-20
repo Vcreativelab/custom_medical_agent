@@ -129,17 +129,22 @@ summarise_prompt = ChatPromptTemplate.from_template("""
 You have collected factual information from several reliable medical websites.
 
 Summarise their content **objectively**:
+
+- Use **Markdown bullets** for each key point, such as medications, treatments, or symptoms.
+- Include the **source** for each bullet in parentheses.
 - Highlight areas of **agreement** and **disagreement**.
-- Mention which sources provide each point.
 - Keep it concise and readable.
 - End by reminding users to consult a healthcare professional.
 
-Sources:
+**Sources provided:**  
 {sources}
 
-User question:
+**User question:**  
 {question}
+
+Format your answer entirely in Markdown.
 """)
+
 
 # ---------------------------------------------------------------------
 # LLM setup
@@ -164,9 +169,12 @@ Encourage seeing a healthcare provider for serious or uncertain cases."""),
 # Smart routing: when to search vs. direct reasoning
 # ---------------------------------------------------------------------
 def should_search(input_text: str) -> bool:
-    keywords = ["treat", "symptom", "drug", "cause", "prevent", "diagnose",
-                "medication", "test", "therapy", "dose", "prescribe"]
-    return any(word in input_text.lower() for word in keywords)
+    keywords = [
+        "treat", "symptom", "drug", "drugs", "medication", "medications",
+        "cause", "prevent", "diagnose", "test", "therapy", "dose", "prescribe"
+    ]
+    input_text_lower = input_text.lower()
+    return any(word in input_text_lower for word in keywords)
 
 
 def route(input_text: str):
@@ -174,26 +182,42 @@ def route(input_text: str):
 
 
 def format_sources(src_dict):
-    return "\n\n".join([f"🔹 {k}:\n{v}" for k, v in src_dict.items()])
+    formatted = ""
+    for site, content in src_dict.items():
+        # Split content into sentences using simple punctuation
+        sentences = re.split(r'(?<=[.!?]) +', content)
+        snippet = " ".join(sentences[:5])  # Take up to 5 sentences
+        formatted += f"- **{site}**:\n  {snippet}\n\n"
+    return formatted
 
 
 # --- define branches ---
 search_branch = (
+    # Step 1: Perform cached medical search
     RunnableLambda(lambda x: medical_search(x["input"]))
+    
+    # Step 2: Format results and include question + history
     | RunnableLambda(lambda res, x: {
         "sources": format_sources(res),
         "question": x["input"],
         "history": x.get("history", [])
     })
+    
+    # Step 3: Summarise the sources in Markdown bullets
     | summarise_chain
+    
+    # Step 4: Prepare context for the main LLM prompt
     | RunnableLambda(lambda summary, x: {
-        "input": f"{x['input']}\n\nContext from verified sources:\n{summary}",
+        "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{summary}",
         "history": x.get("history", [])
     })
+    
+    # Step 5: Main medical prompt to produce user-facing response
     | medical_prompt
     | llm
     | StrOutputParser()
 )
+
 
 no_search_branch = medical_prompt | llm | StrOutputParser()
 
@@ -229,21 +253,28 @@ if submit:
     gif_runner.empty()
 
     st.markdown("### 💬 Suggestion")
-    st.markdown(answer, unsafe_allow_html=True)
+    # Convert line breaks into Markdown-friendly format
+    formatted_answer = answer.replace("\n", "  \n")
+    st.markdown(formatted_answer, unsafe_allow_html=True)
+
 
     st.session_state.memory.chat_memory.add_message(HumanMessage(content=user_query))
     st.session_state.memory.chat_memory.add_message(AIMessage(content=answer))
 
 # Display chat history
 if st.session_state.memory.chat_memory.messages:
-    history_display = "\n\n".join([
-        f"**You:** {m.content}" if isinstance(m, HumanMessage)
-        else f"**DocBot:** {m.content}"
-        for m in st.session_state.memory.chat_memory.messages[-10:]
-    ])
     st.markdown("---")
     st.markdown("### 🩺 Chat History")
-    st.text_area("History", history_display, height=400)
+    history_md = ""
+    for m in st.session_state.memory.chat_memory.messages[-10:]:
+        if isinstance(m, HumanMessage):
+            history_md += f"**You:** {m.content}  \n"
+        else:
+            # Convert AI responses to Markdown bullets
+            content = m.content.replace("\n", "  \n")
+            history_md += f"**DocBot:**  \n{content}  \n\n"
+    st.markdown(history_md, unsafe_allow_html=True)
+
 
 # Sidebar cache management
 with st.sidebar:
