@@ -194,29 +194,41 @@ def format_sources(src_dict):
 # --- define branches ---
 search_branch = (
     # Step 1: Perform cached medical search
-    RunnableLambda(lambda x: medical_search(x["input"]))
-    
-    # Step 2: Format results and include question + history
-    | RunnableLambda(lambda res, x: {
-        "sources": format_sources(res),
+    RunnableLambda(lambda x: {
+        "results": medical_search(x["input"]),
         "question": x["input"],
         "history": x.get("history", [])
     })
     
-    # Step 3: Summarise the sources in Markdown bullets
-    | summarise_chain
-    
-    # Step 4: Prepare context for the main LLM prompt
-    | RunnableLambda(lambda summary, x: {
-        "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{summary}",
-        "history": x.get("history", [])
+    # Step 2: Format results for summarisation
+    | RunnableLambda(lambda x: {
+        "sources": format_sources(x["results"]),
+        "question": x["question"],
+        "history": x["history"]
     })
     
-    # Step 5: Main medical prompt to produce user-facing response
+    # Step 3: Summarise sources
+    | RunnableLambda(lambda x: {
+        "summary": summarise_chain.invoke({
+            "sources": x["sources"],
+            "question": x["question"]
+        }),
+        "question": x["question"],
+        "history": x["history"]
+    })
+    
+    # Step 4: Prepare input for final LLM
+    | RunnableLambda(lambda x: {
+        "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{x['summary']}",
+        "history": x["history"]
+    })
+    
+    # Step 5: Generate user-facing answer
     | medical_prompt
     | llm
     | StrOutputParser()
 )
+
 
 
 no_search_branch = medical_prompt | llm | StrOutputParser()
@@ -273,8 +285,6 @@ if st.session_state.memory.chat_memory.messages:
                 content = m.content.replace("\n", "  \n")
                 history_md += f"**DocBot:**  \n{content}  \n\n"
         st.markdown(history_md, unsafe_allow_html=True)
-
-
 
 
 # Sidebar cache management
