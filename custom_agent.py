@@ -9,7 +9,7 @@ import diskcache as dc
 
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.chains import LLMChain
-from langchain.chains import RunnableBranch, RunnableLambda
+from langchain.core.runnable import RunnableBranch, RunnableLambda
 from langchain.schema import StrOutputParser, AIMessage, HumanMessage
 from langchain.tools import StructuredTool
 from langchain.memory import ConversationBufferWindowMemory
