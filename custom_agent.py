@@ -261,19 +261,20 @@ if submit:
     st.session_state.memory.chat_memory.add_message(HumanMessage(content=user_query))
     st.session_state.memory.chat_memory.add_message(AIMessage(content=answer))
 
-# Display chat history
+# Display chat history in a collapsible expander
 if st.session_state.memory.chat_memory.messages:
     st.markdown("---")
-    st.markdown("### 🩺 Chat History")
-    history_md = ""
-    for m in st.session_state.memory.chat_memory.messages[-10:]:
-        if isinstance(m, HumanMessage):
-            history_md += f"**You:** {m.content}  \n"
-        else:
-            # Convert AI responses to Markdown bullets
-            content = m.content.replace("\n", "  \n")
-            history_md += f"**DocBot:**  \n{content}  \n\n"
-    st.markdown(history_md, unsafe_allow_html=True)
+    with st.expander("🩺 View Chat History", expanded=False):
+        history_md = ""
+        for m in st.session_state.memory.chat_memory.messages[-10:]:
+            if isinstance(m, HumanMessage):
+                history_md += f"**You:** {m.content}  \n"
+            else:
+                content = m.content.replace("\n", "  \n")
+                history_md += f"**DocBot:**  \n{content}  \n\n"
+        st.markdown(history_md, unsafe_allow_html=True)
+
+
 
 
 # Sidebar cache management
