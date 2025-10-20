@@ -126,24 +126,34 @@ medical_search_tool = StructuredTool.from_function(
 # Summarisation prompt for multiple sources
 # ---------------------------------------------------------------------
 summarise_prompt = ChatPromptTemplate.from_template("""
-You have collected factual information from several reliable medical websites.
+You have factual content from multiple reliable medical websites.
 
-Summarise their content **objectively**:
+Your job is to create a **structured Markdown summary** with these sections:
 
-- Use **Markdown bullets** for each key point, such as medications, treatments, or symptoms.
-- Include the **source** for each bullet in parentheses.
-- Highlight areas of **agreement** and **disagreement**.
-- Keep it concise and readable.
-- End by reminding users to consult a healthcare professional.
+### 🩺 Evidence Summary  
+- Present the key facts as **Markdown bullet points**.
+- Each bullet **must end with the source name in parentheses**, e.g. *(Mayo Clinic)*.
+- Combine or contrast findings where sources agree or differ.
+
+### 📚 Areas of Agreement & Disagreement  
+- Highlight where sources say similar or conflicting things.
+
+### 🌐 Sources Used  
+List all sites clearly at the end in Markdown, like:  
+- Mayo Clinic — mayoclinic.org  
+- CDC — cdc.gov  
+- NIH — nih.gov  
+
+Finish by reminding the reader:  
+> This information is for general knowledge only and not a substitute for professional medical advice.
 
 **Sources provided:**  
 {sources}
 
 **User question:**  
 {question}
-
-Format your answer entirely in Markdown.
 """)
+
 
 
 # ---------------------------------------------------------------------
@@ -192,21 +202,26 @@ def format_sources(src_dict):
 
 
 # --- define search branch safely ---
-search_branch = (
-    # Step 1: Perform cached medical search
-    RunnableLambda(lambda x: {
-        "results": medical_search(x["input"]),
+# Step 1: Perform cached medical search with transparency logging
+def search_with_logging(x):
+    results = medical_search(x["input"])
+    st.info(f"🌐 Sources fetched for '{x['input']}': {', '.join(results.keys()) if results else 'None'}")
+    return {
+        "results": results,
         "question": x["input"],
         "history": x.get("history", [])
-    })
+    }
 
+search_branch = (
+    RunnableLambda(search_with_logging)
+    
     # Step 2: Format results for summarisation
     | RunnableLambda(lambda x: {
         "sources": format_sources(x["results"]),
         "question": x["question"],
         "history": x["history"]
     })
-
+    
     # Step 3: Summarise sources with safe fallback
     | RunnableLambda(lambda x: {
         "summary": summarise_chain.invoke({
@@ -216,28 +231,33 @@ search_branch = (
         "question": x["question"],
         "history": x["history"]
     })
-
+    
     # Step 4: Prepare input for final LLM
     | RunnableLambda(lambda x: {
         "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{x['summary']}",
         "history": x["history"]
     })
-
+    
     # Step 5: Generate user-facing answer
     | medical_prompt
     | llm
     | StrOutputParser()
 )
 
-
-
 no_search_branch = medical_prompt | llm | StrOutputParser()
 
-# Corrected RunnableBranch syntax
+# --- corrected router chain with logging ---
+def logging_route(context):
+    """Determine route and log decision in Streamlit."""
+    branch = "search" if route(context["input"]) == "search" else "no_search"
+    st.info(f"🔀 Routing decision: {branch} branch used for this query.")
+    return branch == "search"
+
 router_chain = RunnableBranch(
-    (lambda x: route(x["input"]) == "search", search_branch),  
-    no_search_branch                                    
+    (logging_route, search_branch),
+    no_search_branch
 )
+
 
 # ---------------------------------------------------------------------
 # Response generation helper
