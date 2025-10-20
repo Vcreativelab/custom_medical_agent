@@ -1,191 +1,39 @@
-import streamlit as st
-import langchain
-from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
-from langchain.prompts import StringPromptTemplate
-from langchain.chains import LLMChain
-from langchain_community.tools import DuckDuckGoSearchRun
-from typing import List, Union
-from langchain.schema import AgentAction, AgentFinish
 import os
 import re
 import time
+from datetime import datetime
+from typing import Dict, Any
 
-# Gemini imports
-import google.generativeai as genai
-from langchain_google_genai import GoogleGenerativeAI
-from langchain_google_genai import ChatGoogleGenerativeAI
+import streamlit as st
+import diskcache as dc
+
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains import LLMChain
+from langchain.chains import RunnableBranch, RunnableLambda
+from langchain.schema import StrOutputParser, AIMessage, HumanMessage
+from langchain.tools import StructuredTool
 from langchain.memory import ConversationBufferWindowMemory
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
 
-# --- Updated rate limiting variables for Gemini 2.0 Flash ---
-RATE_LIMIT_SECONDS = 60  # 1 minute window
-MAX_TOKENS_PER_MINUTE = 10_000_000  # 10 million tokens per minute (EU region)
 
-# Store (timestamp, tokens_used) tuples for sliding window token count
-request_tokens = []
-
-def clear_history():
-    if 'history' in st.session_state:
-        del st.session_state['history']
-
-# Page title
+# ---------------------------------------------------------------------
+# Streamlit page setup
+# ---------------------------------------------------------------------
 st.set_page_config(page_title="What's up Doc? 🤖🩺")
 st.title("What's up Doc? 🤖🩺")
 
-# API Key Setup
-if __name__ == '__main__':
-    with st.sidebar:
-        k_value = st.number_input('K value', min_value=1, max_value=10, value=3, on_change=clear_history)
-        use_secrets = st.toggle("Use Streamlit Secrets for API Key", value=True)
+# ---------------------------------------------------------------------
+# Rate limiting setup
+# ---------------------------------------------------------------------
+RATE_LIMIT_SECONDS = 60
+MAX_TOKENS_PER_MINUTE = 10_000_000
+request_tokens = []
 
-        if use_secrets:
-            try:
-                gemini_api_key = st.secrets["GOOGLE_API_KEY"]
-                os.environ['GOOGLE_API_KEY'] = gemini_api_key
-                genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
-            except Exception as e:
-                st.error(f"Error configuring Gemini API: {e}")
-                gemini_api_key = st.text_input('Gemini API Key', type='password')
-                if gemini_api_key:
-                    os.environ['GOOGLE_API_KEY'] = gemini_api_key
-                    genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
-                else:
-                    st.stop()
-        else:
-            gemini_api_key = st.text_input('Gemini API Key', type='password')
-            if gemini_api_key:
-                os.environ['GOOGLE_API_KEY'] = gemini_api_key
-                genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
-            else:
-                st.warning('Please enter your Gemini API key!', icon='⚠')
-                st.stop()
 
-# Define the search tool
-search = DuckDuckGoSearchRun()
-
-def duck_wrapper(input_text):
-    search_results = search.run(f"site:webmd.com {input_text}")
-    return search_results
-
-tools = [
-    Tool(
-        name="Search WebMD",
-        func=duck_wrapper,
-        description="useful for when you need to answer medical and pharmacological questions"
-    )
-]
-
-# Initialize session state variables if not already set
-if "history" not in st.session_state:
-    st.session_state.history = ""
-
-if 'memory' not in st.session_state:
-    st.session_state.memory = ConversationBufferWindowMemory(k=3)
-
-# Ensure conversation length control
-if 'conversation_length' not in st.session_state:
-    st.session_state.conversation_length = 3  # Start with window size of 3
-
-# Create memory with a dynamic window size and expand after each query
-memory = ConversationBufferWindowMemory(k=st.session_state.conversation_length)
-st.session_state.conversation_length += 1
-st.session_state.conversation_length = min(st.session_state.conversation_length, 10)  # Cap at 10
-
-# Set up the base template with few-shot examples
-template_with_history = """You are an AI-powered medical assistant.  
-Your goal is to provide **clear, accurate, and compassionate** medical guidance based on **reliable sources**.  
-You should always prioritize **evidence-based medicine** and **encourage professional consultation** when necessary.  
-
-### **Rules to Follow:**  
-1️⃣ **Context Awareness:** Assume follow-up questions refer to the last discussed condition unless stated otherwise. Clarify when needed.  
-2️⃣ **Clarity & Simplicity:** Use **accessible language** and break down complex terms.  
-3️⃣ **Safety First:** If symptoms suggest a serious condition, **urge the user to seek professional medical care**. Never provide medication dosages.  
-4️⃣ **Honesty in Uncertainty:** If unsure, **DO NOT GUESS**—say that more research is needed.  
-
----
-
-### **Example Responses for Guidance:**  
-
-#### **Basic Definitions**  
-**Question:** What is pneumonia?  
-**Thought:** The user wants a definition. I should provide a concise medical explanation.  
-**Final Answer:** Pneumonia is an infection that inflames the air sacs in the lungs. It can be caused by bacteria, viruses, or fungi.  
-
-#### **Treatment Guidance**  
-**Question:** How is pneumonia treated?  
-**Thought:** The user is asking about treatment. I should include medication options and when to seek medical help.  
-**Final Answer:** Treatment depends on the cause—bacterial pneumonia needs antibiotics, while viral pneumonia requires supportive care.  
-
-#### **Handling Ambiguous Questions**  
-**Question:** Is it dangerous?  
-**Thought:** The user did not specify what "it" refers to. I should ask for clarification if needed, or assume they are referring to the last mentioned condition.  
-**Final Answer:** If you are referring to pneumonia, it can be serious if untreated, especially for older adults or those with weak immune systems.  
-
-#### **Recognizing Urgent Symptoms**  
-**Question:** I have chest pain and trouble breathing. What should I do?  
-**Thought:** The user is describing potentially life-threatening symptoms. I must prioritize their safety.  
-**Final Answer:** Your symptoms could indicate a serious medical emergency, such as a heart attack or severe pneumonia. **Seek emergency medical attention immediately.**  
-
-#### **Preventive Care**  
-**Question:** How can I prevent the flu?  
-**Thought:** The user is asking about flu prevention. I should provide evidence-based recommendations.  
-**Final Answer:** To prevent the flu, get vaccinated annually, wash hands frequently, and avoid close contact with sick individuals.  
-
-#### **Explaining Medical Mechanisms**  
-**Question:** Why does diabetes cause fatigue?  
-**Thought:** The user is asking about the connection between diabetes and fatigue. I should explain how insulin resistance affects energy levels.  
-**Final Answer:** Diabetes can cause fatigue due to unstable blood sugar levels, insulin resistance, and inflammation, which impact the body's ability to use energy efficiently.  
-
----
-
-### **Context:**  
-**Previous conversation history:**  
-{history}  
-
-**New question:** {input}  
-{agent_scratchpad}
-"""
-
-class CustomPromptTemplate(StringPromptTemplate):
-    template: str
-    tools: List[Tool]
-
-    def format(self, **kwargs) -> str:
-        intermediate_steps = kwargs.pop("intermediate_steps")
-        thoughts = ""
-        for action, observation in intermediate_steps:
-            thoughts += action.log
-            thoughts += f"\nObservation: {observation}\nThought: "
-        kwargs["agent_scratchpad"] = thoughts
-        kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
-        kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
-        return self.template.format(**kwargs)
-
-prompt_with_history = CustomPromptTemplate(
-    template=template_with_history,
-    tools=tools,
-    input_variables=["input", "intermediate_steps", "history"]
-)
-
-class CustomOutputParser(AgentOutputParser):
-    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
-        if "Final Answer:" in llm_output:
-            return AgentFinish(
-                return_values={"output": llm_output.split("Final Answer:")[-1].strip()},
-                log=llm_output,
-            )
-        regex = r"Action\s*\d*\s*:\s*(.*?)\n(?:Action\s*\d*\s*Input\s*\d*\s*:\s*(.*))?"
-        match = re.search(regex, llm_output, re.DOTALL)
-        if match:
-            action = match.group(1).strip() if match.group(1) else None
-            action_input = match.group(2).strip() if match.group(2) else ""
-            if action:
-                return AgentAction(tool=action, tool_input=action_input, log=llm_output)
-        return AgentFinish(return_values={"output": llm_output.strip()}, log=llm_output)
-
-output_parser = CustomOutputParser()
-
-# --- Updated token-based rate limit check ---
 def is_rate_limited(tokens_this_request: int) -> bool:
+    """Token-based rate limiter."""
     global request_tokens
     now = time.time()
     request_tokens = [(t, tok) for (t, tok) in request_tokens if now - t < RATE_LIMIT_SECONDS]
@@ -195,59 +43,205 @@ def is_rate_limited(tokens_this_request: int) -> bool:
     request_tokens.append((now, tokens_this_request))
     return False
 
-def get_last_condition(history):
-    matches = re.findall(r"Q:\s*(.*?)\n", history)
-    return matches[-1] if matches else None
 
-def generate_response(input_query, k_value=3):
-    tokens_this_request = max(len(input_query) // 4, 1)
+# ---------------------------------------------------------------------
+# API key handling
+# ---------------------------------------------------------------------
+with st.sidebar:
+    k_value = st.number_input("K value", min_value=1, max_value=10, value=3)
+    use_secrets = st.toggle("Use Streamlit Secrets for API Key", value=True)
+
+    if use_secrets:
+        try:
+            gemini_api_key = st.secrets["GOOGLE_API_KEY"]
+        except Exception:
+            st.error("Missing GOOGLE_API_KEY in Streamlit secrets.")
+            st.stop()
+    else:
+        gemini_api_key = st.text_input("Gemini API Key", type="password")
+        if not gemini_api_key:
+            st.warning("Please enter your Gemini API key!", icon="⚠")
+            st.stop()
+
+os.environ["GOOGLE_API_KEY"] = gemini_api_key
+genai.configure(api_key=gemini_api_key)
+
+# ---------------------------------------------------------------------
+# Memory and cache
+# ---------------------------------------------------------------------
+if "memory" not in st.session_state:
+    st.session_state.memory = ConversationBufferWindowMemory(k=3)
+
+cache = dc.Cache("medical_cache")
+
+# ---------------------------------------------------------------------
+# Search tool with caching + transparency
+# ---------------------------------------------------------------------
+search_engine = DuckDuckGoSearchRun()
+
+
+def medical_search(query: str) -> Dict[str, Any]:
+    """Cached multi-source medical search with transparency messages."""
+    query_key = query.strip().lower()
+
+    if query_key in cache:
+        data = cache[query_key]
+        st.info(f"🔁 Using cached results for '{query}' (last updated {data['timestamp']}).")
+        return data["results"]
+
+    st.info(f"🌐 Searching live sources for '{query}' ...")
+
+    sources = [
+        "webmd.com",
+        "mayoclinic.org",
+        "nih.gov",
+        "cdc.gov",
+        "clevelandclinic.org",
+    ]
+
+    results = {}
+    for src in sources:
+        try:
+            res = search_engine.run(f"site:{src} {query}")
+            if res:
+                results[src] = res[:400]
+        except Exception as e:
+            results[src] = f"Search failed ({e})"
+
+    cache[query_key] = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "results": results,
+    }
+    cache.expire(query_key, 60 * 60 * 24 * 7)  # expire after 7 days
+    return results
+
+
+medical_search_tool = StructuredTool.from_function(
+    func=medical_search,
+    name="MedicalSearch",
+    description="Searches reliable medical websites for evidence-based information.",
+)
+
+# ---------------------------------------------------------------------
+# Summarisation prompt for multiple sources
+# ---------------------------------------------------------------------
+summarise_prompt = ChatPromptTemplate.from_template("""
+You have collected factual information from several reliable medical websites.
+
+Summarise their content **objectively**:
+- Highlight areas of **agreement** and **disagreement**.
+- Mention which sources provide each point.
+- Keep it concise and readable.
+- End by reminding users to consult a healthcare professional.
+
+Sources:
+{sources}
+
+User question:
+{question}
+""")
+
+# ---------------------------------------------------------------------
+# LLM setup
+# ---------------------------------------------------------------------
+llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.2)
+
+summarise_chain = summarise_prompt | llm | StrOutputParser()
+
+# ---------------------------------------------------------------------
+# Main medical conversation prompt
+# ---------------------------------------------------------------------
+medical_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a friendly, evidence-based AI medical assistant.
+Always be clear, factual, and compassionate.
+Never give drug dosages or replace professional diagnosis.
+Encourage seeing a healthcare provider for serious or uncertain cases."""),
+    MessagesPlaceholder(variable_name="history"),
+    ("human", "{input}")
+])
+
+# ---------------------------------------------------------------------
+# Smart routing: when to search vs. direct reasoning
+# ---------------------------------------------------------------------
+def should_search(input_text: str) -> bool:
+    keywords = ["treat", "symptom", "drug", "cause", "prevent", "diagnose",
+                "medication", "test", "therapy", "dose", "prescribe"]
+    return any(word in input_text.lower() for word in keywords)
+
+
+def route(input_text: str):
+    return "search" if should_search(input_text) else "no_search"
+
+
+def format_sources(src_dict):
+    return "\n\n".join([f"🔹 {k}:\n{v}" for k, v in src_dict.items()])
+
+
+# --- define branches ---
+search_branch = (
+    RunnableLambda(lambda x: medical_search(x["input"]))
+    | RunnableLambda(lambda res, x=None: {
+        "sources": format_sources(res),
+        "question": x["input"] if x and "input" in x else "",
+    })
+    | summarise_chain
+    | RunnableLambda(lambda summary, x=None: {
+        "input": f"{x['input']}\n\nContext from verified sources:\n{summary}" if x else summary
+    })
+    | medical_prompt
+    | llm
+    | StrOutputParser()
+)
+
+no_search_branch = medical_prompt | llm | StrOutputParser()
+
+router_chain = RunnableBranch(
+    branches=[(lambda x: route(x["input"]) == "search", search_branch)],
+    default=no_search_branch,
+)
+
+# ---------------------------------------------------------------------
+# Response generation helper
+# ---------------------------------------------------------------------
+def get_medical_answer(query: str) -> str:
+    tokens_this_request = max(len(query) // 4, 1)
     if is_rate_limited(tokens_this_request):
-        st.warning(f"Rate limit exceeded. Please wait {RATE_LIMIT_SECONDS} seconds.")
-        return "The system is currently overloaded. Please try again later."
+        return "⚠️ Rate limit exceeded. Please wait a bit before sending more questions."
 
-    try:
-        # Updated Gemini model
-        llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0)
-        llm_chain = LLMChain(llm=llm, prompt=prompt_with_history)
-        tool_names = [tool.name for tool in tools]
-        memory = st.session_state.memory
+    context = {"input": query, "history": st.session_state.memory.chat_memory.messages}
+    response = router_chain.invoke(context)
+    return response.strip()
 
-        agent = LLMSingleActionAgent(
-            llm_chain=llm_chain,
-            output_parser=output_parser,
-            stop=["\nObservation:"],
-            allowed_tools=tool_names
-        )
+# ---------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------
+with st.form("query_form", clear_on_submit=True):
+    user_query = st.text_input("Ask your medical question")
+    submit = st.form_submit_button("Submit")
 
-        agent_executor = AgentExecutor.from_agent_and_tools(
-            agent=agent,
-            tools=tools,
-            verbose=True,
-            memory=memory
-        )
-
-        if re.match(r"^(how|what|why|when|where|can it|is it)", input_query, re.IGNORECASE):
-            last_condition = get_last_condition(st.session_state.history)
-            if last_condition:
-                input_query = f"{input_query} (Referring to: {last_condition})"
-
-        response = agent_executor.run(input_query)
-        return response
-
-    except Exception as e:
-        st.error(f"An error occurred during the request: {e}")
-        return "An error occurred while processing the request."
-
-with st.form(key="my_query", clear_on_submit=True):
-    q = st.text_input("Ask your question", key="user_question")
-    submit_button = st.form_submit_button("Submit")
-
-if submit_button:
-    gif_runner = st.image("doc.gif", caption="Processing your request", output_format="auto")
-    answer = generate_response(q, k_value)
-    time.sleep(0.5)
+if submit:
+    gif_runner = st.image("doc.gif", caption="Processing...", output_format="auto")
+    answer = get_medical_answer(user_query)
+    time.sleep(0.6)
     gif_runner.empty()
-    st.text_area('**Suggestion**', value=answer, height=200)
-    st.session_state.history = f'Q: {q} \nA: {answer} \n{"-" * 130} \n{st.session_state.history}'
-    st.text_area(label='Chat history', key='history', height=400)
 
+    st.text_area("💬 Suggestion", value=answer, height=220)
+    st.session_state.memory.chat_memory.add_message(HumanMessage(content=user_query))
+    st.session_state.memory.chat_memory.add_message(AIMessage(content=answer))
+
+# Display chat history
+if st.session_state.memory.chat_memory.messages:
+    history_display = "\n\n".join([
+        f"**You:** {m.content}" if isinstance(m, HumanMessage)
+        else f"**DocBot:** {m.content}"
+        for m in st.session_state.memory.chat_memory.messages[-10:]
+    ])
+    st.markdown("---")
+    st.markdown("### 🩺 Chat History")
+    st.text_area("History", history_display, height=400)
+
+# Sidebar cache management
+with st.sidebar:
+    if st.button("Clear cache"):
+        cache.clear()
+        st.success("Cache cleared.")
