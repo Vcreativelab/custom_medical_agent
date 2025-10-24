@@ -42,7 +42,15 @@ def is_rate_limited(tokens_this_request: int) -> bool:
     return False
 
 # -----------------------
-# API key handling
+# Memory and cache
+# -----------------------
+if "memory" not in st.session_state:
+    st.session_state.memory = ConversationBufferWindowMemory(k=3)
+
+cache = dc.Cache("medical_cache")  # define cache first
+
+# -----------------------
+# Sidebar with cache button
 # -----------------------
 with st.sidebar:
     k_value = st.number_input("K value", min_value=1, max_value=10, value=3)
@@ -60,16 +68,13 @@ with st.sidebar:
             st.warning("Please enter your Gemini API key!", icon="⚠")
             st.stop()
 
+    # Clear cache button in sidebar
+    if st.button("Clear Cache"):
+        cache.clear()
+        st.success("✅ Cache cleared!")
+
 os.environ["GOOGLE_API_KEY"] = gemini_api_key
 genai.configure(api_key=gemini_api_key)
-
-# -----------------------
-# Memory and cache
-# -----------------------
-if "memory" not in st.session_state:
-    st.session_state.memory = ConversationBufferWindowMemory(k=3)
-
-cache = dc.Cache("medical_cache")
 
 # -----------------------
 # Search tool with caching
@@ -172,7 +177,7 @@ def format_sources(src_dict: dict) -> str:
 # -----------------------
 def enrich_with_question_and_history(prev, original):
     return {
-        "sources": format_sources(prev),
+        "sources": prev,  # raw search results
         "question": original["input"],
         "history": original.get("history", []),
         "original": original,
@@ -180,7 +185,7 @@ def enrich_with_question_and_history(prev, original):
 
 def summarise_with_sources(data):
     summary = summarise_runnable.invoke({
-        "sources": data["sources"],
+        "sources": data["sources"],  # carry forward correctly
         "question": data["question"]
     })
     return {
@@ -200,7 +205,7 @@ def enrich_final_summary(data):
 ---
 
 **Sources referenced:**  
-{data['sources']}""",
+{format_sources(data['sources'])}""",
         "history": original.get("history", []),
     }
 
