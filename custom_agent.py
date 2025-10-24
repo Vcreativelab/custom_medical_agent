@@ -8,7 +8,8 @@ import streamlit as st
 import diskcache as dc
 
 from langchain.prompts import ChatPromptTemplate
-from langchain.chains import LLMChain
+# from langchain.chains import LLMChain
+from langchain_core.runnables import RunnableMap, RunnableSequence
 from langchain_core.runnables import RunnableBranch, RunnableLambda
 from langchain.schema import StrOutputParser, AIMessage, HumanMessage
 from langchain.tools import StructuredTool
@@ -139,9 +140,11 @@ User question:
 Format your answer entirely in Markdown.
 """)
 
-summarise_chain = LLMChain(
-    llm=ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0),
-    prompt=summarise_prompt,
+# Summarisation chain replacement
+summarise_runnable = (
+    summarise_prompt
+    | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0)
+    | StrOutputParser()
 )
 
 # -----------------------
@@ -176,24 +179,38 @@ def enrich_with_question_and_history(prev, original):
         "original": original,
     }
 
+def summarise_with_sources(data):
+    summary = summarise_runnable.invoke({
+        "sources": data["sources"],
+        "question": data["question"]
+    })
+    return {
+        "summary": summary,
+        "sources": data["sources"],
+        "original": data["original"],
+    }
+
 def enrich_final_summary(data):
-    summary_data = data["summary"]
     original = data["original"]
     return {
-        "input": f"**Question:** {original['input']}\n\n**Verified info:**\n{summary_data}",
+        "input": f"""**Question:** {original['input']}  
+
+**Verified medical information (summarised from sources):**  
+{data['summary']}  
+
+---
+
+**Sources referenced:**  
+{data['sources']}""",
         "history": original.get("history", []),
     }
 
 search_branch = (
     RunnableLambda(lambda x: {"original": x, "results": medical_search(x["input"])})
     | RunnableLambda(lambda d: enrich_with_question_and_history(d["results"], d["original"]))
-    | RunnableLambda(lambda d: {
-        "summary": summarise_chain.invoke({"sources": d["sources"], "question": d["question"]}),
-        "original": d["original"],
-    })
+    | RunnableLambda(lambda d: summarise_with_sources(d))
     | RunnableLambda(lambda d: enrich_final_summary(d))
 )
-
 
 no_search_branch = RunnableLambda(lambda x: {"input": x["input"], "history": x.get("history", [])})
 
@@ -215,9 +232,11 @@ Question and context:
 {input}
 """)
 
-llm_chain = LLMChain(
-    llm=ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0),
-    prompt=medical_prompt,
+# Main LLM chain replacement
+medical_runnable = (
+    medical_prompt
+    | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0)
+    | StrOutputParser()
 )
 
 # -----------------------
@@ -230,7 +249,7 @@ def get_medical_answer(query: str) -> str:
 
     context = {"input": query, "history": st.session_state.memory.chat_memory.messages}
     routed_input = router_chain.invoke(context)
-    final_response = llm_chain.run(routed_input)
+    final_response = medical_runnable.invoke(routed_input)
     return final_response.strip()
 
 # -----------------------
@@ -248,9 +267,9 @@ if submit and user_query:
             st.markdown(
                 """
                 <div style="text-align: center;">
-                    <img src="doc.gif" 
+                    <img src="https://github.com/Vcreativelab/custom_medical_agent/blob/main/doc.gif?raw=true" 
                          width="180" style="border-radius: 10px; margin-bottom: 0.5rem;">
-                    <p style="color: gray; font-size: 0.9rem;">🤖 Processing your question...</p>
+                    <p style="color: gray; font-size: 0.9rem;">🧠 Processing your question...</p>
                 </div>
                 """,
                 unsafe_allow_html=True
