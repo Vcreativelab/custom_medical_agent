@@ -7,7 +7,7 @@ from typing import Dict, Any
 import streamlit as st
 import diskcache as dc
 
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.prompts import ChatPromptTemplate
 from langchain.chains import LLMChain
 from langchain_core.runnables import RunnableBranch, RunnableLambda
 from langchain.schema import StrOutputParser, AIMessage, HumanMessage
@@ -17,25 +17,23 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI
 import google.generativeai as genai
 
-
-# ---------------------------------------------------------------------
+# -----------------------
 # Streamlit page setup
-# ---------------------------------------------------------------------
+# -----------------------
 st.set_page_config(page_title="What's up Doc? 🤖🩺")
 st.title("What's up Doc? ⚕️📖")
 
-# ---------------------------------------------------------------------
-# Rate limiting setup
-# ---------------------------------------------------------------------
+# -----------------------
+# Rate limiting
+# -----------------------
 RATE_LIMIT_SECONDS = 60
 MAX_TOKENS_PER_MINUTE = 10_000_000
 request_tokens = []
 
-
 def is_rate_limited(tokens_this_request: int) -> bool:
-    """Token-based rate limiter."""
     global request_tokens
     now = time.time()
+    # Remove old requests outside window
     request_tokens = [(t, tok) for (t, tok) in request_tokens if now - t < RATE_LIMIT_SECONDS]
     tokens_used = sum(tok for _, tok in request_tokens)
     if tokens_used + tokens_this_request > MAX_TOKENS_PER_MINUTE:
@@ -43,10 +41,9 @@ def is_rate_limited(tokens_this_request: int) -> bool:
     request_tokens.append((now, tokens_this_request))
     return False
 
-
-# ---------------------------------------------------------------------
+# -----------------------
 # API key handling
-# ---------------------------------------------------------------------
+# -----------------------
 with st.sidebar:
     k_value = st.number_input("K value", min_value=1, max_value=10, value=3)
     use_secrets = st.toggle("Use Streamlit Secrets for API Key", value=True)
@@ -66,24 +63,22 @@ with st.sidebar:
 os.environ["GOOGLE_API_KEY"] = gemini_api_key
 genai.configure(api_key=gemini_api_key)
 
-# ---------------------------------------------------------------------
+# -----------------------
 # Memory and cache
-# ---------------------------------------------------------------------
+# -----------------------
 if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferWindowMemory(k=3)
 
 cache = dc.Cache("medical_cache")
 
-# ---------------------------------------------------------------------
-# Search tool with caching + transparency
-# ---------------------------------------------------------------------
+# -----------------------
+# Search tool with caching
+# -----------------------
 search_engine = DuckDuckGoSearchRun()
 
-
 def medical_search(query: str) -> Dict[str, Any]:
-    """Cached multi-source medical search with transparency messages."""
+    """Cached multi-source medical search with safe sources."""
     query_key = query.strip().lower()
-
     if query_key in cache:
         data = cache[query_key]
         st.info(f"🔁 Using cached results for '{query}' (last updated {data['timestamp']}).")
@@ -104,7 +99,7 @@ def medical_search(query: str) -> Dict[str, Any]:
         try:
             res = search_engine.run(f"site:{src} {query}")
             if res:
-                results[src] = res[:400]
+                results[src] = res[:400]  # truncate to avoid too long text
         except Exception as e:
             results[src] = f"Search failed ({e})"
 
@@ -112,203 +107,160 @@ def medical_search(query: str) -> Dict[str, Any]:
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "results": results,
     }
-    cache.expire(query_key, 60 * 60 * 24 * 7)  # expire after 7 days
+    cache.expire(query_key, 60 * 60 * 24 * 7)
     return results
-
 
 medical_search_tool = StructuredTool.from_function(
     func=medical_search,
     name="MedicalSearch",
-    description="Searches reliable medical websites for evidence-based information.",
+    description="Searches reliable medical websites for evidence-based information."
 )
 
-# ---------------------------------------------------------------------
-# Summarisation prompt for multiple sources
-# ---------------------------------------------------------------------
+# -----------------------
+# Summarisation prompt
+# -----------------------
 summarise_prompt = ChatPromptTemplate.from_template("""
-You have factual content from multiple reliable medical websites.
+You have collected factual information from several reliable medical websites.
 
-Your job is to create a **structured Markdown summary** with these sections:
+Summarise their content **objectively**:
 
-### 🩺 Evidence Summary  
-- Present the key facts as **Markdown bullet points**.
-- Each bullet **must end with the source name in parentheses**, e.g. *(Mayo Clinic)*.
-- Combine or contrast findings where sources agree or differ.
+- Use **Markdown bullets** for key points (medications, treatments, symptoms).
+- Include **source** in parentheses.
+- Highlight areas of **agreement** and **disagreement**.
+- Keep it concise and readable.
+- End by reminding users to consult a healthcare professional.
 
-### 📚 Areas of Agreement & Disagreement  
-- Highlight where sources say similar or conflicting things.
-
-### 🌐 Sources Used  
-List all sites clearly at the end in Markdown, like:  
-- Mayo Clinic — mayoclinic.org  
-- CDC — cdc.gov  
-- NIH — nih.gov  
-
-Finish by reminding the reader:  
-> This information is for general knowledge only and not a substitute for professional medical advice.
-
-**Sources provided:**  
+Sources:
 {sources}
 
-**User question:**  
+User question:
 {question}
+
+Format your answer entirely in Markdown.
 """)
 
+summarise_chain = LLMChain(
+    llm=ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0),
+    prompt=summarise_prompt,
+)
 
-
-# ---------------------------------------------------------------------
-# LLM setup
-# ---------------------------------------------------------------------
-llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.2)
-
-summarise_chain = summarise_prompt | llm | StrOutputParser()
-
-# ---------------------------------------------------------------------
-# Main medical conversation prompt
-# ---------------------------------------------------------------------
-medical_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a friendly, evidence-based AI medical assistant.
-Always be clear, factual, and compassionate.
-Never give drug dosages or replace professional diagnosis.
-Encourage seeing a healthcare provider for serious or uncertain cases."""),
-    MessagesPlaceholder(variable_name="history"),
-    ("human", "{input}")
-])
-
-# ---------------------------------------------------------------------
-# Smart routing: when to search vs. direct reasoning
-# ---------------------------------------------------------------------
+# -----------------------
+# Routing logic
+# -----------------------
 def should_search(input_text: str) -> bool:
     keywords = [
         "treat", "symptom", "drug", "drugs", "medication", "medications",
         "cause", "prevent", "diagnose", "test", "therapy", "dose", "prescribe"
     ]
-    input_text_lower = input_text.lower()
-    return any(word in input_text_lower for word in keywords)
-
+    return any(word in input_text.lower() for word in keywords)
 
 def route(input_text: str):
     return "search" if should_search(input_text) else "no_search"
 
-
-def format_sources(src_dict):
+def format_sources(src_dict: dict) -> str:
     formatted = ""
     for site, content in src_dict.items():
-        # Split content into sentences using simple punctuation
         sentences = re.split(r'(?<=[.!?]) +', content)
-        snippet = " ".join(sentences[:5])  # Take up to 5 sentences
+        snippet = " ".join(sentences[:5])
         formatted += f"- **{site}**:\n  {snippet}\n\n"
     return formatted
 
-
-# --- define search branch safely ---
-# Step 1: Perform cached medical search with transparency logging
-def search_with_logging(x):
-    results = medical_search(x["input"])
-    st.info(f"🌐 Sources fetched for '{x['input']}': {', '.join(results.keys()) if results else 'None'}")
-    return {
-        "results": results,
+# -----------------------
+# Branch definitions
+# -----------------------
+# Summarise search results and feed to LLM
+search_branch = (
+    RunnableLambda(lambda x: medical_search(x["input"]))
+    | RunnableLambda(lambda res, x: {
+        "sources": format_sources(res),
         "question": x["input"],
         "history": x.get("history", [])
-    }
-
-search_branch = (
-    RunnableLambda(search_with_logging)
-    
-    # Step 2: Format results for summarisation
-    | RunnableLambda(lambda x: {
-        "sources": format_sources(x["results"]),
-        "question": x["question"],
-        "history": x["history"]
     })
-    
-    # Step 3: Summarise sources with safe fallback
-    | RunnableLambda(lambda x: {
-        "summary": summarise_chain.invoke({
-            "sources": x["sources"],
-            "question": x["question"]
-        }) if x["sources"].strip() else "No verified sources found for this query.",
-        "question": x["question"],
-        "history": x["history"]
+    | summarise_chain
+    | RunnableLambda(lambda summary, x: {
+        "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{summary}",
+        "history": x.get("history", [])
     })
-    
-    # Step 4: Prepare input for final LLM
-    | RunnableLambda(lambda x: {
-        "input": f"**Question:** {x['question']}\n\n**Verified info:**\n{x['summary']}",
-        "history": x["history"]
-    })
-    
-    # Step 5: Generate user-facing answer
-    | medical_prompt
-    | llm
-    | StrOutputParser()
 )
 
-no_search_branch = medical_prompt | llm | StrOutputParser()
-
-# --- corrected router chain with logging ---
-def logging_route(context):
-    """Determine route and log decision in Streamlit."""
-    branch = "search" if route(context["input"]) == "search" else "no_search"
-    st.info(f"🔀 Routing decision: {branch} branch used for this query.")
-    return branch == "search"
+no_search_branch = RunnableLambda(lambda x: {"input": x["input"], "history": x.get("history", [])})
 
 router_chain = RunnableBranch(
-    (logging_route, search_branch),
+    (lambda x: route(x["input"]) == "search", search_branch),
     no_search_branch
 )
 
+# -----------------------
+# Main LLM for final response
+# -----------------------
+medical_prompt = ChatPromptTemplate.from_template("""
+You are a compassionate medical assistant. Answer the following question based on context if provided.
+Always include disclaimers to consult a healthcare professional if needed.
 
-# ---------------------------------------------------------------------
-# Response generation helper
-# ---------------------------------------------------------------------
+Conversation history: {history}
+
+Question and context:
+{input}
+""")
+
+llm_chain = LLMChain(
+    llm=ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0.0),
+    prompt=medical_prompt,
+)
+
+# -----------------------
+# Response helper
+# -----------------------
 def get_medical_answer(query: str) -> str:
     tokens_this_request = max(len(query) // 4, 1)
     if is_rate_limited(tokens_this_request):
-        return "⚠️ Rate limit exceeded. Please wait a bit before sending more questions."
+        return "⚠️ Rate limit exceeded. Please wait a bit."
 
     context = {"input": query, "history": st.session_state.memory.chat_memory.messages}
-    response = router_chain.invoke(context)
-    return response.strip()
+    routed_input = router_chain.invoke(context)
+    final_response = llm_chain.run(routed_input)
+    return final_response.strip()
 
-# ---------------------------------------------------------------------
+# -----------------------
 # Streamlit UI
-# ---------------------------------------------------------------------
+# -----------------------
 with st.form("query_form", clear_on_submit=True):
     user_query = st.text_input("Ask your medical question")
     submit = st.form_submit_button("Submit")
 
-if submit:
-    gif_runner = st.image("doc.gif", caption="Processing...", output_format="auto")
-    answer = get_medical_answer(user_query)
-    time.sleep(0.6)
-    gif_runner.empty()
+if submit and user_query:
+    
+    with st.container():
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown(
+                """
+                <div style="text-align: center;">
+                    <img src="doc.gif" 
+                         width="180" style="border-radius: 10px; margin-bottom: 0.5rem;">
+                    <p style="color: gray; font-size: 0.9rem;">🤖 Processing your question...</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        answer = get_medical_answer(user_query)
+        time.sleep(0.5)
+        st.empty()
 
     st.markdown("### 💬 Suggestion")
-    # Convert line breaks into Markdown-friendly format
-    formatted_answer = answer.replace("\n", "  \n")
-    st.markdown(formatted_answer, unsafe_allow_html=True)
+    st.markdown(answer.replace("\n", "  \n"), unsafe_allow_html=True)
 
-
+    # Add to memory
     st.session_state.memory.chat_memory.add_message(HumanMessage(content=user_query))
     st.session_state.memory.chat_memory.add_message(AIMessage(content=answer))
 
-# Display chat history in a collapsible expander
+# Collapsible chat history
 if st.session_state.memory.chat_memory.messages:
-    st.markdown("---")
     with st.expander("🩺 View Chat History", expanded=False):
         history_md = ""
         for m in st.session_state.memory.chat_memory.messages[-10:]:
             if isinstance(m, HumanMessage):
                 history_md += f"**You:** {m.content}  \n"
             else:
-                content = m.content.replace("\n", "  \n")
-                history_md += f"**DocBot:**  \n{content}  \n\n"
+                history_md += f"**DocBot:**  \n{m.content.replace(chr(10), '  \n')}  \n\n"
         st.markdown(history_md, unsafe_allow_html=True)
-
-
-# Sidebar cache management
-with st.sidebar:
-    if st.button("Clear cache"):
-        cache.clear()
-        st.success("Cache cleared.")
