@@ -168,15 +168,17 @@ def format_sources(src_dict: dict) -> str:
 # -----------------------
 # Branch definitions
 # -----------------------
-# Summarise search results and feed to LLM
 def enrich_with_question_and_history(prev, original):
     return {
         "sources": format_sources(prev),
         "question": original["input"],
         "history": original.get("history", []),
+        "original": original,
     }
 
-def enrich_final_summary(summary_data, original):
+def enrich_final_summary(data):
+    summary_data = data["summary"]
+    original = data["original"]
     return {
         "input": f"**Question:** {original['input']}\n\n**Verified info:**\n{summary_data}",
         "history": original.get("history", []),
@@ -185,9 +187,13 @@ def enrich_final_summary(summary_data, original):
 search_branch = (
     RunnableLambda(lambda x: {"original": x, "results": medical_search(x["input"])})
     | RunnableLambda(lambda d: enrich_with_question_and_history(d["results"], d["original"]))
-    | summarise_chain
-    | RunnableLambda(lambda s, orig=None: enrich_final_summary(s, orig if orig else {}))
+    | RunnableLambda(lambda d: {
+        "summary": summarise_chain.invoke({"sources": d["sources"], "question": d["question"]}),
+        "original": d["original"],
+    })
+    | RunnableLambda(lambda d: enrich_final_summary(d))
 )
+
 
 no_search_branch = RunnableLambda(lambda x: {"input": x["input"], "history": x.get("history", [])})
 
