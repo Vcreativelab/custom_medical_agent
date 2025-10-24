@@ -8,7 +8,6 @@ import streamlit as st
 import diskcache as dc
 
 from langchain.prompts import ChatPromptTemplate
-# from langchain.chains import LLMChain
 from langchain_core.runnables import RunnableMap, RunnableSequence
 from langchain_core.runnables import RunnableBranch, RunnableLambda
 from langchain.schema import StrOutputParser, AIMessage, HumanMessage
@@ -126,12 +125,12 @@ You have collected factual information from several reliable medical websites.
 Summarise their content **objectively**:
 
 - Use **Markdown bullets** for key points (medications, treatments, symptoms).
-- Include **source** in parentheses.
+- Include **source** in parentheses **for every fact**.
 - Highlight areas of **agreement** and **disagreement**.
 - Keep it concise and readable.
 - End by reminding users to consult a healthcare professional.
 
-Sources:
+Sources (include these in your answer):
 {sources}
 
 User question:
@@ -268,7 +267,7 @@ if submit and user_query:
                 """
                 <div style="text-align: center;">
                     <img src="https://github.com/Vcreativelab/custom_medical_agent/blob/main/doc.gif?raw=true" 
-                         width="180" style="border-radius: 10px; margin-bottom: 0.5rem;">
+                         width="220" style="border-radius: 10px; margin-bottom: 0.5rem;">
                     <p style="color: gray; font-size: 0.9rem;">🧠 Processing your question...</p>
                 </div>
                 """,
