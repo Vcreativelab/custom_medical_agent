@@ -360,7 +360,7 @@ def get_medical_answer(query: str) -> str:
 ⚠️ *This information is for educational purposes only and should not replace professional medical advice.*"""
 
         # Translate back to user language only if input was not English
-        if user_lang.lower() != "english":
+        if user_lang.lower() not in ["english", "en"]:
             cache_key = f"{user_lang.lower()}::{final_response.strip()}"
             if cache_key in back_translation_cache:
                 final_response_translated = back_translation_cache[cache_key]
