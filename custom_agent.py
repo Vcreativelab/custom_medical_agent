@@ -204,7 +204,7 @@ def enrich_final_summary(data):
 
 ---
 
-**Sources referenced:**  
+📚 **Sources referenced:**  
 {format_sources(data['sources'])}""",
         "history": original.get("history", []),
     }
@@ -253,7 +253,16 @@ def get_medical_answer(query: str) -> str:
 
     context = {"input": query, "history": st.session_state.memory.chat_memory.messages}
     routed_input = router_chain.invoke(context)
-    final_response = medical_runnable.invoke(routed_input)
+
+    # Detect if the routed output already includes a formatted summary
+    if isinstance(routed_input, dict) and (
+        "Verified medical information" in routed_input.get("input", "") or
+        "Sources referenced" in routed_input.get("input", "")
+    ):
+        final_response = routed_input["input"]
+    else:
+        final_response = medical_runnable.invoke(routed_input)
+
     return final_response.strip()
 
 # -----------------------
