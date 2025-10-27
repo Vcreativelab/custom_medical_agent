@@ -125,23 +125,27 @@ medical_search_tool = StructuredTool.from_function(
 # Summarisation prompt
 # -----------------------
 summarise_prompt = ChatPromptTemplate.from_template("""
-You have collected factual information from several reliable medical websites.
+You are a medical summarisation assistant.
 
-Summarise their content **objectively**:
+Summarise the following **verified medical information** clearly and concisely.
 
-- Use **Markdown bullets** for key points (medications, treatments, symptoms).
-- Include **source** in parentheses **for every fact**.
-- Highlight areas of **agreement** and **disagreement**.
-- Keep it concise and readable.
-- End by reminding users to consult a healthcare professional.
+**Instructions:**
+- Use **short Markdown bullet points** for key facts.
+- For each key fact, include the **source in parentheses**.
+- Focus on **definitions, causes, symptoms, and treatments/medications**.
+- Combine overlapping information across sources (no repetition).
+- Avoid quoting full paragraphs from sources — summarise meaningfully.
+- Finish with a one-line **disclaimer** reminding users to consult a doctor.
 
-Sources (include these in your answer):
+---
+
+**Collected information from sources:**
 {sources}
 
-User question:
+**User question:**
 {question}
 
-Format your answer entirely in Markdown.
+Format your entire answer in Markdown.
 """)
 
 # Summarisation chain replacement
@@ -166,10 +170,9 @@ def route(input_text: str):
 
 def format_sources(src_dict: dict) -> str:
     formatted = ""
-    for site, content in src_dict.items():
-        sentences = re.split(r'(?<=[.!?]) +', content)
-        snippet = " ".join(sentences[:5])
-        formatted += f"- **{site}**:\n  {snippet}\n\n"
+    for site in src_dict.keys():
+        domain = site.replace("www.", "")
+        formatted += f"- [{domain}](https://{domain})\n"
     return formatted
 
 # -----------------------
