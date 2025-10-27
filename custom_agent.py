@@ -328,24 +328,19 @@ back_translation_cache = dc.Cache(os.path.join(os.getcwd(), "back_translation_ca
 # -----------------------
 def get_medical_answer(query: str) -> str:
     """Generate a medical answer, translating back to original language if needed."""
-    final_response = None # initialize to catch issues
+    final_response = None  # initialize to catch issues
     tokens_this_request = max(len(query) // 4, 1)
     if is_rate_limited(tokens_this_request):
         return "⚠️ Rate limit exceeded. Please wait a bit."
-    
-    # st.write("DEBUG: Query received:", query)
-    
+
     try:
         # Detect language and translate to English if needed
         lang_info = detect_and_translate(query)
         user_lang = lang_info["language"]
         translated_query = lang_info["translation"]
-        # st.write("DEBUG: Language detected:", user_lang)
-        # st.write("DEBUG: Translated query:", translated_query)
 
         context = {"input": translated_query, "history": st.session_state.memory.chat_memory.messages}
         routed_input = router_chain.invoke(context)
-        # st.write("DEBUG: Routed input:", routed_input)
 
         # Get or summarise response
         if isinstance(routed_input, dict) and (
@@ -364,7 +359,7 @@ def get_medical_answer(query: str) -> str:
 
 ⚠️ *This information is for educational purposes only and should not replace professional medical advice.*"""
 
-        # Translate back to user language if needed and not English
+        # Translate back to user language only if input was not English
         if user_lang.lower() != "english":
             cache_key = f"{user_lang.lower()}::{final_response.strip()}"
             if cache_key in back_translation_cache:
@@ -395,7 +390,7 @@ def get_medical_answer(query: str) -> str:
                     st.warning(f"⚠️ Back-translation failed, showing English answer: {e}")
                     final_response_translated = final_response
 
-            # Optionally indicate translation
+            # Add translation note only if actually translated
             final_response = f"*Translated from English to {user_lang}*\n\n{final_response_translated}"
 
     except Exception as e:
@@ -416,8 +411,11 @@ with st.form("query_form", clear_on_submit=True):
     submit = st.form_submit_button("Submit")
 
 if submit and user_query:
-    
-    with st.container():
+
+    # Placeholder for GIF
+    gif_placeholder = st.empty()
+
+    with gif_placeholder.container():
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.markdown(
@@ -430,9 +428,13 @@ if submit and user_query:
                 """,
                 unsafe_allow_html=True
             )
-        answer = get_medical_answer(user_query)
-        time.sleep(0.5)
-        st.empty()
+
+    # Generate answer
+    answer = get_medical_answer(user_query)
+    time.sleep(0.5)
+
+    # Clear GIF
+    gif_placeholder.empty()
 
     st.markdown("### 💬 Suggestion")
     st.markdown(answer.replace("\n", "  \n"), unsafe_allow_html=True)
