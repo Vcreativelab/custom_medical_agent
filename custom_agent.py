@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 from datetime import datetime
 from typing import Dict, Any
@@ -8,7 +9,7 @@ import streamlit as st
 import diskcache as dc
 
 from langchain.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableMap, RunnableSequence
+# from langchain_core.runnables import RunnableMap, RunnableSequence
 from langchain_core.runnables import RunnableBranch, RunnableLambda
 from langchain.schema import StrOutputParser, AIMessage, HumanMessage
 from langchain.tools import StructuredTool
@@ -47,7 +48,7 @@ def is_rate_limited(tokens_this_request: int) -> bool:
 if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferWindowMemory(k=3)
 
-cache = dc.Cache("medical_cache")  # define cache first
+cache = dc.Cache(os.path.join(os.getcwd(), "medical_cache"))
 
 # -----------------------
 # Sidebar with cache button
@@ -156,14 +157,64 @@ summarise_runnable = (
 )
 
 # -----------------------
+# Language detection & translation
+# -----------------------
+translation_cache = dc.Cache(os.path.join(os.getcwd(), "translation_cache"))
+
+
+def detect_and_translate(query: str) -> Dict[str, str]:
+    """Detect the language and translate non-English text to English using Gemini (robust JSON-safe version)."""
+    translator_prompt = ChatPromptTemplate.from_template("""
+    You are a translation assistant.
+    Detect the language of this text and, if it's not English, translate it into English.
+    Return the result strictly in JSON with this structure:
+    {
+        "language": "<detected_language>",
+        "translation": "<english_translation>"
+    }
+    Text: {text}
+    """)
+
+    query_key = query.strip().lower()
+    if query_key in translation_cache:
+        return translation_cache[query_key]
+
+    translator_chain = (
+        translator_prompt
+        | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
+        | StrOutputParser()
+    )
+
+    try:
+        result = translator_chain.invoke({"text": query}).strip()
+
+        # Extract JSON portion from the model's response safely
+        match = re.search(r"\{.*\}", result, re.DOTALL)
+        if match:
+            raw_json = match.group(0)
+            # Replace single quotes with double quotes and fix newlines
+            clean_json = raw_json.replace("'", '"').replace("\n", " ")
+            parsed = json.loads(clean_json)
+            lang = parsed.get("language", "unknown")
+            translation = parsed.get("translation", query)
+        else:
+            # Fallback if no valid JSON is found
+            lang, translation = "unknown", query
+
+    except Exception as e:
+        st.warning(f"Translation parsing issue: {e}")
+        lang, translation = "unknown", query
+
+    translation_cache[query_key] = {"language": lang, "translation": translation}
+    translation_cache.expire(query_key, 60 * 60 * 24 * 7)  # 1 week
+    return {"language": lang, "translation": translation}
+
+# -----------------------
 # Routing logic
 # -----------------------
 def should_search(input_text: str) -> bool:
-    keywords = [
-        "treat", "symptom", "drug", "drugs", "medication", "medications",
-        "cause", "prevent", "diagnose", "test", "therapy", "dose", "prescribe"
-    ]
-    return any(word in input_text.lower() for word in keywords)
+    pattern = r"\b(treat(ment)?|symptom(s)?|drug(s)?|medication(s)?|cause(s)?|prevent(ion)?|diagnos(e|is)|test(s)?|therapy|dose|prescrib(e|ed|ing))\b"
+    return bool(re.search(pattern, input_text.lower()))
 
 def route(input_text: str):
     return "search" if should_search(input_text) else "no_search"
@@ -230,12 +281,26 @@ router_chain = RunnableBranch(
 # Main LLM for final response
 # -----------------------
 medical_prompt = ChatPromptTemplate.from_template("""
-You are a compassionate medical assistant. Answer the following question based on context if provided.
-Always include disclaimers to consult a healthcare professional if needed.
+You are **DocBot**, a knowledgeable and empathetic medical assistant.
 
-Conversation history: {history}
+Your tone should be:
+- **Professional and factual**, not casual.
+- **Clear and simple**, avoiding unnecessary jargon.
+- **Neutral** and **evidence-based** — do not speculate or invent facts.
 
-Question and context:
+When answering:
+- Give **concise explanations** of the condition or topic.
+- If relevant, include **possible causes, symptoms, treatments, or precautions**.
+- Do **not** recommend specific medications unless they are **widely accepted** first-line options.
+- If unsure, clearly say that more context or clinical evaluation is needed.
+- Always end with a **disclaimer** reminding users to consult a licensed healthcare professional.
+
+---
+
+Conversation history:
+{history}
+
+User question and context:
 {input}
 """)
 
@@ -254,10 +319,17 @@ def get_medical_answer(query: str) -> str:
     if is_rate_limited(tokens_this_request):
         return "⚠️ Rate limit exceeded. Please wait a bit."
 
-    context = {"input": query, "history": st.session_state.memory.chat_memory.messages}
+    # 🧠 Detect and translate if not English
+    lang_info = detect_and_translate(query)
+    user_lang = lang_info["language"]
+    translated_query = lang_info["translation"]
+
+    if user_lang.lower() != "english":
+        st.info(f"🌐 Detected language: {user_lang}. Translating to English for search and summarization.")
+
+    context = {"input": translated_query, "history": st.session_state.memory.chat_memory.messages}
     routed_input = router_chain.invoke(context)
 
-    # Detect if the routed output already includes a formatted summary
     if isinstance(routed_input, dict) and (
         "Verified medical information" in routed_input.get("input", "") or
         "Sources referenced" in routed_input.get("input", "")
@@ -265,6 +337,30 @@ def get_medical_answer(query: str) -> str:
         final_response = routed_input["input"]
     else:
         final_response = medical_runnable.invoke(routed_input)
+        final_response = f"""**Question:** {query}  
+
+**Answer:**  
+{final_response}  
+
+---
+
+⚠️ *This information is for educational purposes only and should not replace professional medical advice.*"""
+
+    # 🔁 If original language is not English → translate back
+    if user_lang.lower() != "english":
+        translator_back_prompt = ChatPromptTemplate.from_template("""
+        Translate the following English text naturally into {lang} while preserving meaning and markdown formatting:
+        {text}
+        """)
+        translator_back_chain = (
+            translator_back_prompt
+            | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
+            | StrOutputParser()
+        )
+        try:
+            final_response = translator_back_chain.invoke({"lang": user_lang, "text": final_response})
+        except Exception:
+            st.warning("Translation back to original language failed. Showing English result.")
 
     return final_response.strip()
 
@@ -273,6 +369,7 @@ def get_medical_answer(query: str) -> str:
 # -----------------------
 with st.form("query_form", clear_on_submit=True):
     user_query = st.text_input("Ask your medical question")
+    st.caption("🌍 Multilingual mode active — non-English questions are translated to English for evidence-based sources.")
     submit = st.form_submit_button("Submit")
 
 if submit and user_query:
