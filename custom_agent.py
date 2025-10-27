@@ -163,22 +163,17 @@ summarise_runnable = (
 translation_cache = dc.Cache(os.path.join(os.getcwd(), "translation_cache"))
 
 def detect_and_translate(query: str) -> Dict[str, str]:
-    """Detect the language and translate non-English text to English using Gemini (robust JSON-safe version)."""
+    """Detect language and translate non-English text to English with debug info."""
+    query_key = query.strip().lower()
+    if query_key in translation_cache:
+        return translation_cache[query_key]
 
     translator_prompt = ChatPromptTemplate.from_template("""
     You are a translation assistant.
     Detect the language of this text and, if it's not English, translate it into English.
-    Return the result ONLY as JSON inside a triple backtick code block, like this:
-    
-    ```json
-    {{"language": "<detected_language>", "translation": "<english_translation>"}}
-    ```
+    Return strictly JSON with keys "language" and "translation".
     Text: {text}
     """)
-
-    query_key = query.strip().lower()
-    if query_key in translation_cache:
-        return translation_cache[query_key]
 
     translator_chain = (
         translator_prompt
@@ -186,21 +181,21 @@ def detect_and_translate(query: str) -> Dict[str, str]:
         | StrOutputParser()
     )
 
+    lang, translation = "unknown", query  # fallback
+
     try:
         result = translator_chain.invoke({"text": query}).strip()
+        st.write("DEBUG: Raw translation output:", result)
 
-        # Prefer JSON inside code block first
-        match = re.search(r"```json\s*(\{.*?\})\s*```", result, re.DOTALL | re.IGNORECASE)
-        if not match:
-            match = re.search(r"\{.*\}", result, re.DOTALL)
-
+        # Try JSON extraction first
+        match = re.search(r"\{.*?\}", result, re.DOTALL)
         if match:
-            raw_json = match.group(1) if match.lastindex else match.group(0)
+            raw_json = match.group(0)
             clean_json = raw_json.replace("'", '"').replace("\n", " ").strip()
             try:
                 parsed = json.loads(clean_json)
             except json.JSONDecodeError:
-                # 🧩 fallback: extract key-value pairs manually
+                st.warning(f"DEBUG: JSON decode failed: {clean_json}")
                 parsed = {}
                 lang_match = re.search(r'"language"\s*:\s*"([^"]+)"', clean_json)
                 trans_match = re.search(r'"translation"\s*:\s*"([^"]+)"', clean_json)
@@ -208,22 +203,18 @@ def detect_and_translate(query: str) -> Dict[str, str]:
                     parsed["language"] = lang_match.group(1)
                 if trans_match:
                     parsed["translation"] = trans_match.group(1)
+
             lang = parsed.get("language", "unknown").strip()
             translation = parsed.get("translation", query).strip()
-        else:
-            lang, translation = "unknown", query
-
-        # Normalize text (remove accents + trim whitespace)
-        lang = unicodedata.normalize("NFKC", lang)
-        translation = unicodedata.normalize("NFKC", translation)
-        translation = " ".join(translation.split())
 
     except Exception as e:
-        st.warning(f"⚠️ Translation parsing issue: {e}")
-        lang, translation = "unknown", query
+        st.warning(f"DEBUG: Translation step failed: {e}")
+
+    st.write("DEBUG: Parsed language:", lang)
+    st.write("DEBUG: Parsed translation:", translation)
 
     translation_cache[query_key] = {"language": lang, "translation": translation}
-    translation_cache.expire(query_key, 60 * 60 * 24 * 7)  # 1 week
+    translation_cache.expire(query_key, 60 * 60 * 24 * 7)
     return {"language": lang, "translation": translation}
 
 # -----------------------
@@ -336,29 +327,33 @@ back_translation_cache = dc.Cache(os.path.join(os.getcwd(), "back_translation_ca
 # Get_medical_answer() back-translation block
 # -----------------------
 def get_medical_answer(query: str) -> str:
+    final_response = None  # initialize to catch issues
     tokens_this_request = max(len(query) // 4, 1)
     if is_rate_limited(tokens_this_request):
         return "⚠️ Rate limit exceeded. Please wait a bit."
+    
+    st.write("DEBUG: Query received:", query)
+    
+    try:
+        # Detect and translate
+        lang_info = detect_and_translate(query)
+        user_lang = lang_info["language"]
+        translated_query = lang_info["translation"]
+        st.write("DEBUG: Language detected:", user_lang)
+        st.write("DEBUG: Translated query:", translated_query)
 
-    # Detect and translate if not English
-    lang_info = detect_and_translate(query)
-    user_lang = lang_info["language"]
-    translated_query = lang_info["translation"]
+        context = {"input": translated_query, "history": st.session_state.memory.chat_memory.messages}
+        routed_input = router_chain.invoke(context)
+        st.write("DEBUG: Routed input:", routed_input)
 
-    if user_lang.lower() != "english":
-        st.info(f"🌐 Detected language: {user_lang}. Translating to English for search and summarization.")
-
-    context = {"input": translated_query, "history": st.session_state.memory.chat_memory.messages}
-    routed_input = router_chain.invoke(context)
-
-    if isinstance(routed_input, dict) and (
-        "Verified medical information" in routed_input.get("input", "") or
-        "Sources referenced" in routed_input.get("input", "")
-    ):
-        final_response = routed_input["input"]
-    else:
-        final_response = medical_runnable.invoke(routed_input)
-        final_response = f"""**Question:** {query}  
+        if isinstance(routed_input, dict) and (
+            "Verified medical information" in routed_input.get("input", "") or
+            "Sources referenced" in routed_input.get("input", "")
+        ):
+            final_response = routed_input.get("input")
+        else:
+            final_response = medical_runnable.invoke(routed_input)
+            final_response = f"""**Question:** {query}  
 
 **Answer:**  
 {final_response}  
@@ -366,39 +361,16 @@ def get_medical_answer(query: str) -> str:
 ---
 
 ⚠️ *This information is for educational purposes only and should not replace professional medical advice.*"""
+    except Exception as e:
+        st.error(f"DEBUG: Error in get_medical_answer: {e}")
+        final_response = f"⚠️ Failed to generate an answer: {e}"
 
-        # 🔁 If original language is not English → translate back
-        if user_lang.lower() != "english":
-            cache_key = f"{user_lang.lower()}::{final_response.strip()}"
-            if cache_key in back_translation_cache:
-                final_response = back_translation_cache[cache_key]
-            else:
-                translator_back_prompt = ChatPromptTemplate.from_template("""
-                You are a translation assistant.
-                Translate the following English text into the language specified below.
-                Keep meaning, tone, and Markdown formatting intact.
-                
-                Target language: {target_lang}
-                Text to translate:
-                {text}
-                """)
-            
-                translator_back_chain = (
-                    translator_back_prompt
-                    | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
-                    | StrOutputParser()
-                )
-        
-                try:
-                    final_response_translated = translator_back_chain.invoke({
-                        "target_lang": user_lang,
-                        "text": final_response
-                    }).strip()
-                    back_translation_cache[cache_key] = final_response_translated
-                    back_translation_cache.expire(cache_key, 60 * 60 * 24 * 7)  # 1 week
-                    final_response = final_response_translated
-                except Exception as e:
-                    st.warning(f"⚠️ Translation back to original language failed: {e}")
+    # Safety fallback
+    if not final_response:
+        final_response = "⚠️ No answer generated."
+
+    st.write("DEBUG: Final response:", final_response)
+    return final_response.strip()
 
 # -----------------------
 # Streamlit UI
