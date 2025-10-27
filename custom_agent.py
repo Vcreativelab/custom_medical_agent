@@ -4,6 +4,7 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, Any
+import unicodedata
 
 import streamlit as st
 import diskcache as dc
@@ -161,17 +162,17 @@ summarise_runnable = (
 # -----------------------
 translation_cache = dc.Cache(os.path.join(os.getcwd(), "translation_cache"))
 
-
 def detect_and_translate(query: str) -> Dict[str, str]:
     """Detect the language and translate non-English text to English using Gemini (robust JSON-safe version)."""
+
     translator_prompt = ChatPromptTemplate.from_template("""
     You are a translation assistant.
     Detect the language of this text and, if it's not English, translate it into English.
-    Return the result strictly in JSON with this structure:
-    {
-        "language": "<detected_language>",
-        "translation": "<english_translation>"
-    }
+    Return the result ONLY as JSON inside a triple backtick code block, like this:
+    
+    ```json
+    {{"language": "<detected_language>", "translation": "<english_translation>"}}
+    ```
     Text: {text}
     """)
 
@@ -188,21 +189,37 @@ def detect_and_translate(query: str) -> Dict[str, str]:
     try:
         result = translator_chain.invoke({"text": query}).strip()
 
-        # Extract JSON portion from the model's response safely
-        match = re.search(r"\{.*\}", result, re.DOTALL)
+        # Prefer JSON inside code block first
+        match = re.search(r"```json\s*(\{.*?\})\s*```", result, re.DOTALL | re.IGNORECASE)
+        if not match:
+            match = re.search(r"\{.*\}", result, re.DOTALL)
+
         if match:
-            raw_json = match.group(0)
-            # Replace single quotes with double quotes and fix newlines
-            clean_json = raw_json.replace("'", '"').replace("\n", " ")
-            parsed = json.loads(clean_json)
-            lang = parsed.get("language", "unknown")
-            translation = parsed.get("translation", query)
+            raw_json = match.group(1) if match.lastindex else match.group(0)
+            clean_json = raw_json.replace("'", '"').replace("\n", " ").strip()
+            try:
+                parsed = json.loads(clean_json)
+            except json.JSONDecodeError:
+                # 🧩 fallback: extract key-value pairs manually
+                parsed = {}
+                lang_match = re.search(r'"language"\s*:\s*"([^"]+)"', clean_json)
+                trans_match = re.search(r'"translation"\s*:\s*"([^"]+)"', clean_json)
+                if lang_match:
+                    parsed["language"] = lang_match.group(1)
+                if trans_match:
+                    parsed["translation"] = trans_match.group(1)
+            lang = parsed.get("language", "unknown").strip()
+            translation = parsed.get("translation", query).strip()
         else:
-            # Fallback if no valid JSON is found
             lang, translation = "unknown", query
 
+        # Normalize text (remove accents + trim whitespace)
+        lang = unicodedata.normalize("NFKC", lang)
+        translation = unicodedata.normalize("NFKC", translation)
+        translation = " ".join(translation.split())
+
     except Exception as e:
-        st.warning(f"Translation parsing issue: {e}")
+        st.warning(f"⚠️ Translation parsing issue: {e}")
         lang, translation = "unknown", query
 
     translation_cache[query_key] = {"language": lang, "translation": translation}
@@ -312,14 +329,18 @@ medical_runnable = (
 )
 
 # -----------------------
-# Response helper
+# Back-translation cache
+# -----------------------
+back_translation_cache = dc.Cache(os.path.join(os.getcwd(), "back_translation_cache"))
+# -----------------------
+# Get_medical_answer() back-translation block
 # -----------------------
 def get_medical_answer(query: str) -> str:
     tokens_this_request = max(len(query) // 4, 1)
     if is_rate_limited(tokens_this_request):
         return "⚠️ Rate limit exceeded. Please wait a bit."
 
-    # 🧠 Detect and translate if not English
+    # Detect and translate if not English
     lang_info = detect_and_translate(query)
     user_lang = lang_info["language"]
     translated_query = lang_info["translation"]
@@ -346,23 +367,38 @@ def get_medical_answer(query: str) -> str:
 
 ⚠️ *This information is for educational purposes only and should not replace professional medical advice.*"""
 
-    # 🔁 If original language is not English → translate back
-    if user_lang.lower() != "english":
-        translator_back_prompt = ChatPromptTemplate.from_template("""
-        Translate the following English text naturally into {lang} while preserving meaning and markdown formatting:
-        {text}
-        """)
-        translator_back_chain = (
-            translator_back_prompt
-            | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
-            | StrOutputParser()
-        )
-        try:
-            final_response = translator_back_chain.invoke({"lang": user_lang, "text": final_response})
-        except Exception:
-            st.warning("Translation back to original language failed. Showing English result.")
-
-    return final_response.strip()
+        # 🔁 If original language is not English → translate back
+        if user_lang.lower() != "english":
+            cache_key = f"{user_lang.lower()}::{final_response.strip()}"
+            if cache_key in back_translation_cache:
+                final_response = back_translation_cache[cache_key]
+            else:
+                translator_back_prompt = ChatPromptTemplate.from_template("""
+                You are a translation assistant.
+                Translate the following English text into the language specified below.
+                Keep meaning, tone, and Markdown formatting intact.
+                
+                Target language: {target_lang}
+                Text to translate:
+                {text}
+                """)
+            
+                translator_back_chain = (
+                    translator_back_prompt
+                    | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
+                    | StrOutputParser()
+                )
+        
+                try:
+                    final_response_translated = translator_back_chain.invoke({
+                        "target_lang": user_lang,
+                        "text": final_response
+                    }).strip()
+                    back_translation_cache[cache_key] = final_response_translated
+                    back_translation_cache.expire(cache_key, 60 * 60 * 24 * 7)  # 1 week
+                    final_response = final_response_translated
+                except Exception as e:
+                    st.warning(f"⚠️ Translation back to original language failed: {e}")
 
 # -----------------------
 # Streamlit UI
