@@ -185,7 +185,7 @@ def detect_and_translate(query: str) -> Dict[str, str]:
 
     try:
         result = translator_chain.invoke({"text": query}).strip()
-        st.write("DEBUG: Raw translation output:", result)
+        # st.write("DEBUG: Raw translation output:", result)
 
         # Try JSON extraction first
         match = re.search(r"\{.*?\}", result, re.DOTALL)
@@ -210,8 +210,8 @@ def detect_and_translate(query: str) -> Dict[str, str]:
     except Exception as e:
         st.warning(f"DEBUG: Translation step failed: {e}")
 
-    st.write("DEBUG: Parsed language:", lang)
-    st.write("DEBUG: Parsed translation:", translation)
+    # st.write("DEBUG: Parsed language:", lang)
+    # st.write("DEBUG: Parsed translation:", translation)
 
     translation_cache[query_key] = {"language": lang, "translation": translation}
     translation_cache.expire(query_key, 60 * 60 * 24 * 7)
@@ -327,51 +327,86 @@ back_translation_cache = dc.Cache(os.path.join(os.getcwd(), "back_translation_ca
 # Get_medical_answer() back-translation block
 # -----------------------
 def get_medical_answer(query: str) -> str:
-    final_response = None  # initialize to catch issues
+    """Generate a medical answer, translating back to original language if needed."""
+    final_response = None # initialize to catch issues
     tokens_this_request = max(len(query) // 4, 1)
     if is_rate_limited(tokens_this_request):
         return "⚠️ Rate limit exceeded. Please wait a bit."
     
-    st.write("DEBUG: Query received:", query)
+    # st.write("DEBUG: Query received:", query)
     
     try:
-        # Detect and translate
+        # Detect language and translate to English if needed
         lang_info = detect_and_translate(query)
         user_lang = lang_info["language"]
         translated_query = lang_info["translation"]
-        st.write("DEBUG: Language detected:", user_lang)
-        st.write("DEBUG: Translated query:", translated_query)
+        # st.write("DEBUG: Language detected:", user_lang)
+        # st.write("DEBUG: Translated query:", translated_query)
 
         context = {"input": translated_query, "history": st.session_state.memory.chat_memory.messages}
         routed_input = router_chain.invoke(context)
-        st.write("DEBUG: Routed input:", routed_input)
+        # st.write("DEBUG: Routed input:", routed_input)
 
+        # Get or summarise response
         if isinstance(routed_input, dict) and (
             "Verified medical information" in routed_input.get("input", "") or
             "Sources referenced" in routed_input.get("input", "")
         ):
             final_response = routed_input.get("input")
         else:
-            final_response = medical_runnable.invoke(routed_input)
-            final_response = f"""**Question:** {query}  
+            english_response = medical_runnable.invoke(routed_input)
+            final_response = f"""**Question:** {query}    
 
 **Answer:**  
-{final_response}  
+{english_response}  
 
 ---
 
 ⚠️ *This information is for educational purposes only and should not replace professional medical advice.*"""
+
+        # Translate back to user language if needed and not English
+        if user_lang.lower() != "english":
+            cache_key = f"{user_lang.lower()}::{final_response.strip()}"
+            if cache_key in back_translation_cache:
+                final_response_translated = back_translation_cache[cache_key]
+            else:
+                translator_back_prompt = ChatPromptTemplate.from_template("""
+                You are a translation assistant.
+                Translate the following English text into the language specified below.
+                Preserve meaning, tone, and Markdown formatting.
+
+                Target language: {target_lang}
+                Text to translate:
+                {text}
+                """)
+                translator_back_chain = (
+                    translator_back_prompt
+                    | ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
+                    | StrOutputParser()
+                )
+                try:
+                    final_response_translated = translator_back_chain.invoke({
+                        "target_lang": user_lang,
+                        "text": final_response
+                    }).strip()
+                    back_translation_cache[cache_key] = final_response_translated
+                    back_translation_cache.expire(cache_key, 60 * 60 * 24 * 7)  # 1 week
+                except Exception as e:
+                    st.warning(f"⚠️ Back-translation failed, showing English answer: {e}")
+                    final_response_translated = final_response
+
+            # Optionally indicate translation
+            final_response = f"*Translated from English to {user_lang}*\n\n{final_response_translated}"
+
     except Exception as e:
-        st.error(f"DEBUG: Error in get_medical_answer: {e}")
+        st.error(f"⚠️ Error generating answer: {e}")
         final_response = f"⚠️ Failed to generate an answer: {e}"
 
-    # Safety fallback
     if not final_response:
         final_response = "⚠️ No answer generated."
 
-    st.write("DEBUG: Final response:", final_response)
     return final_response.strip()
-
+    
 # -----------------------
 # Streamlit UI
 # -----------------------
