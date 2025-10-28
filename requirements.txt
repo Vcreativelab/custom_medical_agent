@@ -8,7 +8,7 @@ streamlit==1.39.0
 # ===== LangChain Ecosystem =====
 langchain==0.2.15
 langchain-community==0.2.9
-langchain-google-genai==0.2.1
+langchain-google-genai==1.0.7
 google-generativeai==0.7.0
 
 # ===== Search & Caching =====
