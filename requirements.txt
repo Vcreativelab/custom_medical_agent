@@ -14,8 +14,8 @@ google-generativeai==0.7.0
 # ===== Search & Caching =====
 duckduckgo-search==5.3.0
 diskcache==5.6.3
-ddgs==0.5.1
 
 # ===== Version Pinning Metadata =====
 # This file is pinned for Streamlit Cloud deployment stability.
-# If upgrading LangChain or Google libraries, test locally before redeploying.
+# Do not include 'ddgs' (deprecated). 'duckduckgo-search' covers it.
+# If upgrading LangChain or Google libs, test locally before redeploying.
