@@ -5,15 +5,16 @@ wheel==0.44.0
 # ===== Core =====
 streamlit==1.39.0
 
-# ===== LangChain =====
-langchain==0.2.15
-langchain-community==0.2.9
+# LangChain unified >=0.3.x
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-core==0.3.15
 
-# ===== Google GenAI Integration =====
+# Google Generative AI stack
 langchain-google-genai==2.1.10
 google-generativeai==0.8.3
 
-# ===== Search & Cache =====
+# Search and Cache
 duckduckgo-search==5.3.0
 diskcache==5.6.3
 
@@ -21,4 +22,5 @@ diskcache==5.6.3
 # This file is pinned for Streamlit Cloud deployment stability.
 # Do not include 'ddgs' (deprecated). 'duckduckgo-search' covers it.
 # If upgrading LangChain or Google libs, test locally before redeploying.
+
 
