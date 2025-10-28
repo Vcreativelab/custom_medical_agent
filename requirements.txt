@@ -7,7 +7,7 @@ streamlit==1.39.0
 
 # ===== LangChain Ecosystem =====
 langchain==0.2.15
-langchain-community==0.2.8
+langchain-community==0.2.9
 langchain-google-genai==0.2.1
 google-generativeai==0.7.0
 
@@ -18,4 +18,4 @@ ddgs==0.5.1
 
 # ===== Version Pinning Metadata =====
 # This file is pinned for Streamlit Cloud deployment stability.
-# If upgrading any of the LangChain or Google libraries, test locally before redeploying.
+# If upgrading LangChain or Google libraries, test locally before redeploying.
