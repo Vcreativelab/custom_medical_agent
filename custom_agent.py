@@ -25,6 +25,32 @@ import google.generativeai as genai
 st.set_page_config(page_title="What's up Doc? 🤖🩺")
 st.title("What's up Doc? ⚕️📖")
 
+#------------------------
+# Debugging
+#------------------------
+import streamlit as st
+import pkg_resources
+
+st.title("🧩 Environment Debug Info")
+
+# List the main packages you want to track
+main_packages = [
+    "streamlit",
+    "langchain",
+    "langchain-community",
+    "langchain-google-genai",
+    "google-generativeai",
+    "duckduckgo-search",
+    "diskcache",
+    "ddgs"
+]
+
+with st.expander("Show main installed packages"):
+    if st.button("Show installed packages"):
+        packages = {d.project_name: d.version for d in pkg_resources.working_set}
+        filtered_packages = {pkg: packages.get(pkg, "Not Installed") for pkg in main_packages}
+        st.json(filtered_packages)
+
 # -----------------------
 # Rate limiting
 # -----------------------
